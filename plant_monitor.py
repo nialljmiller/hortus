@@ -13,6 +13,7 @@ import subprocess
 import sys
 import psutil
 import RPi.GPIO as GPIO
+import heater_control
 
 # Functions for system monitoring
 def get_cpu_temp():
@@ -72,7 +73,7 @@ def makedata(sample_duration=1, sample_interval=0.1):
             temperature = bme280.temperature
             humidity = bme280.humidity
             pressure = bme280.pressure
-
+            heater_control.update_temperature(temperature)
             # Read system performance metrics
             cpu_temp = get_cpu_temp()
             cpu_usage = get_cpu_usage()
@@ -164,7 +165,7 @@ for pin in SENSOR_POWER_PINS:
 i2c = busio.I2C(board.SCL, board.SDA)
 ads = ADS.ADS1115(i2c)
 bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
-
+heater_control.start_heater_control()
 # File paths
 local_csv = "/home/nill/plant_data.csv"
 system_csv_file = "/home/nill/system_data.csv"
