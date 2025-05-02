@@ -18,39 +18,6 @@ from picamera2 import Picamera2
 import heater_control
 import gc  # Garbage collection
 
-
-def take_picture_safely():
-    """Capture image with timeout protection"""
-    try:
-        # Run camera capture in separate process with timeout
-        result = subprocess.run(
-            ["python3", "-c", """
-import time
-from picamera2 import Picamera2
-from datetime import datetime
-
-picam2 = Picamera2()
-picam2.start()
-time.sleep(1)
-image_path = f"/home/nill/images/plant_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-picam2.capture_file(image_path)
-picam2.stop()
-print(image_path)
-            """],
-            capture_output=True,
-            text=True,
-            timeout=15  # 15-second timeout
-        )
-        
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return None
-    except Exception as e:
-        print(f"Camera error: {e}")
-        return None
-
-
-
 # Functions for system monitoring
 def get_cpu_temp():
     try:
@@ -273,31 +240,89 @@ def makedata(sample_duration=1, sample_interval=0.1):
     print(f"\tCPU Temperature: {median_cpu_temp}°C, CPU Usage: {median_cpu_usage}%, Memory Usage: {median_memory_usage}%")
     print("\t-----------------------------------------\n")
 
-
-
+# Function to transfer data
 def send_data():
-    print("Transferring data to the server...")
-    
-    # First transfer sensor data (the critical part)
+    print("Taking picture and transferring data to the server...")
     try:
-        subprocess.run(["scp", local_csv, f"{server_address}:{server_csv_path}"], check=True)
-        subprocess.run(["scp", system_csv_file, f"{server_address}:{system_server_csv_path}"], check=True)
-        print("Sensor data successfully transferred.")
+        # Take a picture first
+        image_file = take_picture()
+        
+        # Set up retry mechanism and bandwidth control
+        max_retries = 3
+        bandwidth_limit = "500"  # Bandwidth limit in Kbps
+        connection_timeout = "10"  # Connection timeout in seconds
+        
+        # Transfer the image if capture was successful
+        if image_file and os.path.exists(image_file):
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(f"Transferring image file {image_file} to server (attempt {attempt}/{max_retries})...")
+                    subprocess.run(
+                        [
+                            "scp", "-v", "-l", bandwidth_limit,
+                            "-o", f"ConnectTimeout={connection_timeout}",
+                            image_file, f"{server_address}:{server_image_dir}"
+                        ],
+                        check=True
+                    )
+                    print(f"Image file successfully transferred on attempt {attempt}.")
+                    
+                    break
+                except subprocess.CalledProcessError as e:
+                    print(f"Error during image transfer attempt {attempt}: {e}")
+                    if attempt < max_retries:
+                        print("Retrying image transfer...")
+                        time.sleep(2)  # Wait before retrying
+                    else:
+                        print(f"All {max_retries} attempts failed for image transfer.")
+        
+        # Transfer sensor data CSV
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"Transferring plant data to server (attempt {attempt}/{max_retries})...")
+                subprocess.run(
+                    [
+                        "scp", "-v", "-l", bandwidth_limit,
+                        "-o", f"ConnectTimeout={connection_timeout}",
+                        local_csv, f"{server_address}:{server_csv_path}"
+                    ],
+                    check=True
+                )
+                print(f"Plant data successfully transferred on attempt {attempt}.")
+                break
+            except subprocess.CalledProcessError as e:
+                print(f"Error during plant data transfer attempt {attempt}: {e}")
+                if attempt < max_retries:
+                    print("Retrying plant data transfer...")
+                    time.sleep(2)
+                else:
+                    print(f"All {max_retries} attempts failed for plant data transfer.")
+        
+        # Transfer system data CSV
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"Transferring system data to server (attempt {attempt}/{max_retries})...")
+                subprocess.run(
+                    [
+                        "scp", "-v", "-l", bandwidth_limit,
+                        "-o", f"ConnectTimeout={connection_timeout}",
+                        system_csv_file, f"{server_address}:{system_server_csv_path}"
+                    ],
+                    check=True
+                )
+                print(f"System data successfully transferred on attempt {attempt}.")
+                break
+            except subprocess.CalledProcessError as e:
+                print(f"Error during system data transfer attempt {attempt}: {e}")
+                if attempt < max_retries:
+                    print("Retrying system data transfer...")
+                    time.sleep(2)
+                else:
+                    print(f"All {max_retries} attempts failed for system data transfer.")
+        
+        print("All data successfully transferred to the server.")
     except Exception as e:
-        print(f"Error transferring sensor data: {e}")
-    
-    # Then attempt camera capture but don't let it block operation
-    print("Taking picture and transferring to server...")
-    image_path = take_picture_safely()
-    
-    if image_path:
-        try:
-            subprocess.run(["scp", image_path, f"{server_address}:{server_image_path}"], check=True)
-            print(f"Image transferred: {image_path}")
-        except Exception as e:
-            print(f"Image transfer error: {e}")
-    else:
-        print("Image capture failed - continuing operation")
+        print(f"Error in data transfer process: {e}")
 
 # Function to delete local data
 def del_data():
@@ -402,6 +427,7 @@ while True:
             
         # Force garbage collection after operations
         gc.collect()
+        time.sleep(60)
         
     except Exception as e:
         print(f"Unexpected error: {e}")
