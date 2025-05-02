@@ -16,6 +16,7 @@ import RPi.GPIO as GPIO
 # Import camera library
 from picamera2 import Picamera2
 import heater_control
+import gc  # Garbage collection
 
 # Functions for system monitoring
 def get_cpu_temp():
@@ -399,25 +400,36 @@ if not os.path.exists(system_csv_file):
 
 print("Plant Monitoring System Initialized!\n")
 
+
+# Main loop with memory management
 send_counter = 0
-# Main loop
+memory_threshold = 75  # Set a memory threshold percentage
 while True:
     try:
-        makedata()
-        send_counter = send_counter + 1
+        # Check memory usage before proceeding
+        current_memory = get_memory_usage()
+        if current_memory > memory_threshold:
+            print(f"WARNING: High memory usage detected: {current_memory}%. Performing cleanup...")
+            gc.collect()  # Force garbage collection
+            # If still high, restart the process
+            if get_memory_usage() > memory_threshold:
+                print("Memory still high after cleanup. Restarting process...")
+                # Optional: Save state before exit
+                os.execv(sys.executable, ['python'] + sys.argv)
         
-        # Send data every 10 iterations
+        makedata()
+        send_counter = (send_counter + 1) % 600  # Use modulo to avoid unbounded growth
+        
         if send_counter % 10 == 0:
             send_data()
-            
-        # Clean up data every 600 iterations
-        if send_counter >= 600:
+        if send_counter == 0:  # This will happen when it reaches 600
             del_data()
-            send_counter = 0
             
-        # Sleep between iterations
-        time.sleep(60)  # Run every minute
+        # Force garbage collection after operations
+        gc.collect()
         
     except Exception as e:
-        print(f"Unexpected error in main loop: {e}")
-        time.sleep(10)  # Wait and try to recover
+        print(f"Unexpected error: {e}")
+        # Clean up GPIO before exiting
+        GPIO.cleanup()
+        break
