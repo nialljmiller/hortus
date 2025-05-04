@@ -13,10 +13,11 @@ import subprocess
 import sys
 import psutil
 import RPi.GPIO as GPIO
-# Import camera library
-from picamera2 import Picamera2
-import heater_control
 import gc  # Garbage collection
+
+# Import custom modules
+import heater_control
+import camera_control
 
 # Functions for system monitoring
 def get_cpu_temp():
@@ -52,119 +53,6 @@ def read_sensor(sensor_index):
     value = sensor.value  # Read the sensor
     GPIO.output(SENSOR_POWER_PINS[sensor_index], GPIO.LOW)  # Turn it off
     return value
-
-def is_stable(prev_meta, curr_meta, threshold=0.05):
-    """
-    Compare selected metadata values between two frames.
-    Returns True if all values change less than the threshold (relative difference).
-    """
-    # List the keys you want to check
-    keys_to_check = ["ExposureTime", "AnalogGain"]
-    
-    for key in keys_to_check:
-        if key in prev_meta and key in curr_meta:
-            # Avoid division by zero in case a value is zero
-            if prev_meta[key] == 0:
-                continue
-            print(f"{key} : {curr_meta[key]}")
-            relative_change = abs(curr_meta[key] - prev_meta[key]) / prev_meta[key]
-            if relative_change > threshold:
-                return False
-    return True
-
-def take_picture():
-    """Take a picture with the camera and save it to the specified directory."""
-    try:
-        # Initialize the camera
-        picam2.start()
-
-        # Apply fully automatic settings
-        picam2.set_controls({
-            "AeEnable": True,  # Enable Auto Exposure
-            "AwbEnable": True,  # Enable Auto White Balance
-            "Saturation": 1.0,  # Normal color saturation
-            "Contrast": 1.0,    # Normal contrast
-            "Sharpness": 1.1,   # Slightly enhance details        
-        })
-
-        time.sleep(0.5)  # Allow auto-settings to initialize
-
-        # Get initial metadata
-        metadata = picam2.capture_metadata()
-        
-        # Check for low light conditions using metadata
-        light_level = metadata.get("Lux", 200)  # Default to bright if value missing
-        
-        if light_level < 100:  # Low light condition
-            print("Low light detected. Adjusting settings...")
-            picam2.set_controls({
-                "AnalogueGain": 9.0,  # Higher gain for low light
-                "Saturation": 0.0,    # Reduce saturation in low light
-                "Contrast": 1.2,      # Increase contrast
-                "Sharpness": 1.5,     # Increase sharpness
-            })
-
-        time.sleep(0.5)  # Allow settings to apply
-
-        # Stabilization loop
-        prev_metadata = None
-        stable_count = 0
-        required_stable_iterations = 3
-        max_iterations = 10
-        iteration = 0
-
-        while iteration < max_iterations:
-            _ = picam2.capture_array("main")  # Dummy capture to update settings
-            curr_metadata = picam2.capture_metadata()
-
-            if prev_metadata is not None:
-                # Check if settings have stabilized
-                if is_stable(prev_metadata, curr_metadata, threshold=0.02):  
-                    stable_count += 1
-                    print(f"Stability check passed {stable_count}/{required_stable_iterations}")
-                else:
-                    # Only reset if the fluctuation is major
-                    if "ExposureTime" in prev_metadata and "ExposureTime" in curr_metadata:
-                        if abs(prev_metadata["ExposureTime"] - curr_metadata["ExposureTime"]) > 5000:
-                            stable_count = 0
-
-            prev_metadata = curr_metadata
-            iteration += 1
-
-            if stable_count >= required_stable_iterations:
-                print("Camera settings have stabilized.")
-                break
-
-            time.sleep(0.5)  # Waiting between stability checks
-
-        if iteration == max_iterations:
-            print("Max iterations reached; proceeding with capture regardless.")
-
-        # Capture final image
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        image_filename = os.path.join(image_dir, f"plant_{timestamp_str}.jpg")
-        picam2.capture_file(image_filename)
-        
-        # Create a symbolic link to the latest image
-        latest_image = os.path.join(image_dir, "latest.jpg")
-        if os.path.exists(latest_image):
-            os.remove(latest_image)
-        try:
-            os.symlink(image_filename, latest_image)
-        except Exception as e:
-            print(f"Error creating symlink: {e}")
-            
-        print(f"Image captured: {image_filename}")
-        picam2.stop()
-        return image_filename
-    except Exception as e:
-        print(f"Error capturing image: {e}")
-        try:
-            picam2.stop()
-        except:
-            pass
-        return None
-
 
 # Function to log sensor data
 def makedata(sample_duration=1, sample_interval=0.1):
@@ -244,8 +132,8 @@ def makedata(sample_duration=1, sample_interval=0.1):
 def send_data():
     print("Taking picture and transferring data to the server...")
     try:
-        # Take a picture first
-        image_file = take_picture()
+        # Take a picture using the camera_control module
+        image_file = camera_control.take_picture(image_dir)
         
         # Set up retry mechanism and bandwidth control
         max_retries = 3
@@ -275,6 +163,8 @@ def send_data():
                         time.sleep(2)  # Wait before retrying
                     else:
                         print(f"All {max_retries} attempts failed for image transfer.")
+        else:
+            print("No image file captured or file doesn't exist. Skipping image transfer.")
         
         # Transfer sensor data CSV
         for attempt in range(1, max_retries + 1):
@@ -338,18 +228,14 @@ def del_data():
         writer = csv.writer(file)
         writer.writerow(["Timestamp", "CPU_Temperature_C", "CPU_Usage_percent", "Memory_Usage_percent"])
     
-    # Cleanup old images but keep the latest 100
-    try:
-        image_files = sorted(glob.glob(f"{image_dir}/plant_*.jpg"))
-        if len(image_files) > 100:
-            for old_file in image_files[:-100]:
-                try:
-                    os.remove(old_file)
-                    print(f"Removed old image: {old_file}")
-                except Exception as e:
-                    print(f"Error removing old image {old_file}: {e}")
-    except Exception as e:
-        print(f"Error cleaning up images: {e}")
+    # Cleanup old images using the camera_control module
+    deleted_count = camera_control.cleanup_old_images(image_dir, keep_last=100)
+    if deleted_count > 0:
+        print(f"Cleaned up {deleted_count} old images.")
+    elif deleted_count == 0:
+        print("No old images needed to be cleaned up.")
+    else:
+        print("Error occurred during image cleanup.")
 
     print("Local data cleared.")
 
@@ -366,12 +252,9 @@ for pin in SENSOR_POWER_PINS:
 i2c = busio.I2C(board.SCL, board.SDA)
 ads = ADS.ADS1115(i2c)
 bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
-heater_control.start_heater_control()
 
-# Initialize camera
-picam2 = Picamera2()
-# Default configuration
-picam2.configure(picam2.create_still_configuration())
+# Start heater control
+heater_control.start_heater_control()
 
 # File paths
 BASE_DIR = "/home/nill"
@@ -400,37 +283,54 @@ if not os.path.exists(system_csv_file):
 
 print("Plant Monitoring System Initialized!\n")
 
-
 # Main loop with memory management
 send_counter = 0
 memory_threshold = 75  # Set a memory threshold percentage
-while True:
-    try:
-        # Check memory usage before proceeding
-        current_memory = get_memory_usage()
-        if current_memory > memory_threshold:
-            print(f"WARNING: High memory usage detected: {current_memory}%. Performing cleanup...")
-            gc.collect()  # Force garbage collection
-            # If still high, restart the process
-            if get_memory_usage() > memory_threshold:
-                print("Memory still high after cleanup. Restarting process...")
-                # Optional: Save state before exit
-                os.execv(sys.executable, ['python'] + sys.argv)
-        
-        makedata()
-        send_counter = (send_counter + 1) % 600  # Use modulo to avoid unbounded growth
-        
-        if send_counter % 10 == 0:
-            send_data()
-        if send_counter == 0:  # This will happen when it reaches 600
-            del_data()
+
+try:
+    # Start the camera control module (takes pictures in background thread)
+    camera_control.start_camera_control(image_dir, interval_minutes=10)
+    
+    while True:
+        try:
+            # Check memory usage before proceeding
+            current_memory = get_memory_usage()
+            if current_memory > memory_threshold:
+                print(f"WARNING: High memory usage detected: {current_memory}%. Performing cleanup...")
+                gc.collect()  # Force garbage collection
+                # If still high, restart the process
+                if get_memory_usage() > memory_threshold:
+                    print("Memory still high after cleanup. Restarting process...")
+                    # Stop modules before exiting
+                    heater_control.stop_heater_control()
+                    camera_control.stop_camera_control()
+                    # Optional: Save state before exit
+                    os.execv(sys.executable, ['python'] + sys.argv)
             
-        # Force garbage collection after operations
-        gc.collect()
-        time.sleep(60)
-        
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        # Clean up GPIO before exiting
-        GPIO.cleanup()
-        break
+            makedata()
+            send_counter = (send_counter + 1) % 600  # Use modulo to avoid unbounded growth
+            
+            if send_counter % 10 == 0:
+                send_data()
+            if send_counter == 0:  # This will happen when it reaches 600
+                del_data()
+                
+            # Force garbage collection after operations
+            gc.collect()
+            time.sleep(60)
+            
+        except Exception as e:
+            print(f"Unexpected error in main loop: {e}")
+            time.sleep(60)  # Wait a bit before retrying
+            
+except KeyboardInterrupt:
+    print("Program interrupted by user. Cleaning up...")
+except Exception as e:
+    print(f"Critical error: {e}")
+finally:
+    # Clean up resources
+    print("Shutting down plant monitoring system...")
+    heater_control.stop_heater_control()
+    camera_control.stop_camera_control()
+    GPIO.cleanup()
+    print("Plant monitoring system shutdown complete.")
