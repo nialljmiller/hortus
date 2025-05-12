@@ -4,7 +4,7 @@ from kasa import SmartPlug
 import threading
 
 # Configuration for heater control
-HEATER_IP = "192.168.0.148"  # Your Kasa plug IP
+HEATER_IP = "192.168.0.147"  # Your Kasa plug IP
 TEMP_THRESHOLD = 10.0        # Temperature threshold in Celsius
 HEATER_ON_TIME = 120         # 2 minutes (in seconds)
 HEATER_OFF_TIME = 60         # 1 minute (in seconds)
