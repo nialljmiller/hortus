@@ -14,6 +14,19 @@ import sys
 import psutil
 import RPi.GPIO as GPIO
 import gc  # Garbage collection
+import logging
+
+# Logging configuration
+LOG_FILE = "/home/nill/plant_monitor.log"
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+# System thresholds
+MEMORY_THRESHOLD = 75  # percent
+CPU_TEMP_THRESHOLD = 80  # Celsius
 
 # Import custom modules
 import heater_control
@@ -32,6 +45,38 @@ def get_cpu_usage():
 
 def get_memory_usage():
     return psutil.virtual_memory().percent
+
+
+def shutdown():
+    """Gracefully stop all subsystems and clean up GPIO."""
+    logging.info("Initiating shutdown sequence")
+    try:
+        heater_control.stop_heater_control()
+        camera_control.stop_camera_control()
+    finally:
+        GPIO.cleanup()
+    logging.info("Shutdown complete")
+
+
+def check_system_resources():
+    """Monitor system resources and act on critical conditions."""
+    cpu_temp = get_cpu_temp()
+    if cpu_temp != "Unavailable" and cpu_temp > CPU_TEMP_THRESHOLD:
+        warning = f"High CPU temperature detected: {cpu_temp}°C"
+        print(f"WARNING: {warning}")
+        logging.warning(warning)
+        heater_control.stop_heater_control()
+        camera_control.stop_camera_control()
+        time.sleep(30)
+        cpu_temp = get_cpu_temp()
+        if cpu_temp > CPU_TEMP_THRESHOLD:
+            logging.error("CPU temperature critical after cooldown, restarting")
+            shutdown()
+            os.execv(sys.executable, ['python'] + sys.argv)
+        else:
+            logging.info("CPU temperature normalized, restarting subsystems")
+            heater_control.start_heater_control()
+            camera_control.start_camera_control(image_dir, interval_minutes=CAMERA_INTERVAL)
 
 
 def read_sensor(sensor_index):
@@ -132,8 +177,11 @@ def makedata(sample_duration=1, sample_interval=0.1):
 def send_data():
     print("Taking picture and transferring data to the server...")
     try:
-        # Take a picture using the camera_control module
-        image_file = camera_control.take_picture(image_dir)
+        # Use the most recent image from the background camera thread
+        image_file = camera_control.get_latest_image()
+        if not image_file or not os.path.exists(image_file):
+            # Fallback to capture a new image if none is available
+            image_file = camera_control.take_picture(image_dir)
         
         # Set up retry mechanism and bandwidth control
         max_retries = 3
@@ -151,7 +199,8 @@ def send_data():
                             "-o", f"ConnectTimeout={connection_timeout}",
                             image_file, f"{server_address}:{server_image_dir}"
                         ],
-                        check=True
+                        check=True,
+                        timeout=60
                     )
                     print(f"Image file successfully transferred on attempt {attempt}.")
                     
@@ -176,7 +225,8 @@ def send_data():
                         "-o", f"ConnectTimeout={connection_timeout}",
                         local_csv, f"{server_address}:{server_csv_path}"
                     ],
-                    check=True
+                    check=True,
+                    timeout=60
                 )
                 print(f"Plant data successfully transferred on attempt {attempt}.")
                 break
@@ -198,7 +248,8 @@ def send_data():
                         "-o", f"ConnectTimeout={connection_timeout}",
                         system_csv_file, f"{server_address}:{system_server_csv_path}"
                     ],
-                    check=True
+                    check=True,
+                    timeout=60
                 )
                 print(f"System data successfully transferred on attempt {attempt}.")
                 break
@@ -266,6 +317,9 @@ server_csv_path = "/media/bigdata/plant_station/plant_data.csv"
 system_server_csv_path = "/media/bigdata/plant_station/plant_system_data.csv"
 server_image_dir = "/media/bigdata/plant_station/images"
 
+# Camera capture interval in minutes
+CAMERA_INTERVAL = 10
+
 # Ensure directories exist
 os.makedirs(image_dir, exist_ok=True)
 
@@ -282,30 +336,37 @@ if not os.path.exists(system_csv_file):
         writer.writerow(["Timestamp", "CPU_Temperature_C", "CPU_Usage_percent", "Memory_Usage_percent"])
 
 print("Plant Monitoring System Initialized!\n")
+logging.info("Plant Monitoring System Initialized")
 
-# Main loop with memory management
+# Main loop with memory and temperature management
 send_counter = 0
-memory_threshold = 75  # Set a memory threshold percentage
 
 try:
     # Start the camera control module (takes pictures in background thread)
-    camera_control.start_camera_control(image_dir, interval_minutes=10)
+    camera_control.start_camera_control(image_dir, interval_minutes=CAMERA_INTERVAL)
     
     while True:
         try:
             # Check memory usage before proceeding
             current_memory = get_memory_usage()
-            if current_memory > memory_threshold:
-                print(f"WARNING: High memory usage detected: {current_memory}%. Performing cleanup...")
+            if current_memory > MEMORY_THRESHOLD:
+                warning = (
+                    f"High memory usage detected: {current_memory}%"
+                )
+                print(f"WARNING: {warning} Performing cleanup...")
+                logging.warning(warning)
                 gc.collect()  # Force garbage collection
                 # If still high, restart the process
-                if get_memory_usage() > memory_threshold:
+                if get_memory_usage() > MEMORY_THRESHOLD:
+                    logging.error("Memory still high after cleanup. Restarting process")
                     print("Memory still high after cleanup. Restarting process...")
                     # Stop modules before exiting
                     heater_control.stop_heater_control()
                     camera_control.stop_camera_control()
                     # Optional: Save state before exit
                     os.execv(sys.executable, ['python'] + sys.argv)
+
+            check_system_resources()
             
             makedata()
             send_counter = (send_counter + 1) % 600  # Use modulo to avoid unbounded growth
@@ -330,7 +391,5 @@ except Exception as e:
 finally:
     # Clean up resources
     print("Shutting down plant monitoring system...")
-    heater_control.stop_heater_control()
-    camera_control.stop_camera_control()
-    GPIO.cleanup()
+    shutdown()
     print("Plant monitoring system shutdown complete.")
