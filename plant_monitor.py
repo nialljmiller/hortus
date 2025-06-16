@@ -177,8 +177,11 @@ def makedata(sample_duration=1, sample_interval=0.1):
 def send_data():
     print("Taking picture and transferring data to the server...")
     try:
-        # Take a picture using the camera_control module
-        image_file = camera_control.take_picture(image_dir)
+        # Use the most recent image from the background camera thread
+        image_file = camera_control.get_latest_image()
+        if not image_file or not os.path.exists(image_file):
+            # Fallback to capture a new image if none is available
+            image_file = camera_control.take_picture(image_dir)
         
         # Set up retry mechanism and bandwidth control
         max_retries = 3
@@ -196,7 +199,8 @@ def send_data():
                             "-o", f"ConnectTimeout={connection_timeout}",
                             image_file, f"{server_address}:{server_image_dir}"
                         ],
-                        check=True
+                        check=True,
+                        timeout=60
                     )
                     print(f"Image file successfully transferred on attempt {attempt}.")
                     
@@ -221,7 +225,8 @@ def send_data():
                         "-o", f"ConnectTimeout={connection_timeout}",
                         local_csv, f"{server_address}:{server_csv_path}"
                     ],
-                    check=True
+                    check=True,
+                    timeout=60
                 )
                 print(f"Plant data successfully transferred on attempt {attempt}.")
                 break
@@ -243,7 +248,8 @@ def send_data():
                         "-o", f"ConnectTimeout={connection_timeout}",
                         system_csv_file, f"{server_address}:{system_server_csv_path}"
                     ],
-                    check=True
+                    check=True,
+                    timeout=60
                 )
                 print(f"System data successfully transferred on attempt {attempt}.")
                 break
