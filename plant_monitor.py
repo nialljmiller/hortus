@@ -378,11 +378,11 @@ try:
                 
             # Force garbage collection after operations
             gc.collect()
-            time.sleep(60)
+            time.sleep(6)
             
         except Exception as e:
             print(f"Unexpected error in main loop: {e}")
-            time.sleep(60)  # Wait a bit before retrying
+            time.sleep(6)  # Wait a bit before retrying
             
 except KeyboardInterrupt:
     print("Program interrupted by user. Cleaning up...")
